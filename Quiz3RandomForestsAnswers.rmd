@@ -1,0 +1,175 @@
+---
+output:
+  word_document: default
+  html_document: default
+---
+## Module 4 - Quiz 4 Random Forests 
+
+```{r}
+
+library(tidymodels)
+library(tidyverse)
+library(caret)
+library(gridExtra)
+library(vip)
+library(ranger)
+library(skimr)
+
+library(readr)
+drug_data <- read_csv("drug_data.csv") 
+
+# Assigning names to variables(columns)
+
+names(drug_data) <- c("ID", "Age", "Gender", "Education", "Country", "Ethnicity", "Nscore", "Escore", "Oscore", "Ascore", "Cscore", "Impulsive", "SS", "Alcohol", "Amphet", "Amyl", "Benzos", "Caff", "Cannabis", "Choc", "Coke", "Crack", "Ecstasy", "Heroin", "Ketamine", "Legalh", "LSD", "Meth", "Mushroom", "Nicotine", "Semer", "VSA") 
+
+# code replaces values in the data frame and replace with appropriate Yes or No
+
+drug_data[drug_data == "CL0"] = "No"
+drug_data[drug_data == "CL1"] = "No" 
+drug_data[drug_data == "CL2"] = "Yes"
+drug_data[drug_data == "CL3"] = "Yes"
+drug_data[drug_data == "CL4"] = "Yes"
+drug_data[drug_data == "CL5"] = "Yes"
+drug_data[drug_data == "CL6"] = "Yes" 
+
+# Factor conversion and recoding (renaming); mutate_at used to target specific ranges of variables 
+
+drug_clean <- drug_data %>% mutate_at(vars(Age:Ethnicity), funs(as_factor)) %>%
+  mutate(Age = factor(Age, labels = c("18_24", "25_34", "35_44", "45_54", "55_64", "65_"))) %>%
+  mutate(Gender = factor(Gender, labels = c("Male", "Female"))) %>%
+  mutate(Education = factor(Education, labels = c("Under16", "At16", "At17", "At18", "SomeCollege", "ProfessionalCert", "Bachelors", "Masters", "Doctorate"))) %>% 
+  mutate(Country = factor(Country, labels = c("USA", "NewZealand", "Other", "Australia", "Ireland", "Canada", "UK"))) %>%
+  mutate(Ethnicity = factor(Ethnicity, labels = c("Black", "Asian", "White", "White/Black", "Other", "White/Asian", "Black/Asian")))  %>%
+  mutate_at(vars(Alcohol:VSA), funs(as_factor)) %>%
+  select(-ID) 
+
+str(drug_clean) 
+
+drug_clean <- drug_clean %>% select(!(Alcohol:Mushroom)) %>%
+  select(!(Semer:VSA))
+
+```
+
+```{r}
+# Answer 1 
+
+skim(drug_clean) 
+
+# Answer 2 
+
+set.seed(1234)
+drug_split <- initial_split(drug_clean, prop = 0.70, strata = Nicotine)
+drug_train <- training(drug_split)
+drug_test <- testing(drug_split)
+
+```
+
+```{r}
+# Answer 3 
+
+p1 <- ggplot(drug_train, aes(x = Age, fill = Nicotine)) + geom_bar(position = "fill")
+p2 <- ggplot(drug_train, aes(x = Gender, fill = Nicotine)) + geom_bar(position = "fill")
+p3 <- ggplot(drug_train, aes(x = Education, fill = Nicotine)) + geom_bar(position = "fill")
+p4 <- ggplot(drug_train, aes(x = Country, fill = Nicotine)) + geom_bar(position = "fill")
+p5 <- ggplot(drug_train, aes(x = Ethnicity, fill = Nicotine)) + geom_bar(position = "fill")
+
+grid.arrange(p1,p2,p3,p4,p5)
+```
+
+```{r} 
+# Answer 4
+p1 <- ggplot(drug_train, aes(x = Nicotine, y = Nscore)) + geom_boxplot()
+p2 <- ggplot(drug_train, aes(x = Nicotine, y = Escore)) + geom_boxplot()
+p3 <- ggplot(drug_train, aes(x = Nicotine, y = Oscore)) + geom_boxplot()
+p4 <- ggplot(drug_train, aes(x = Nicotine, y = Ascore)) + geom_boxplot()
+p5 <- ggplot(drug_train, aes(x = Nicotine, y = Cscore)) + geom_boxplot()
+p6 <- ggplot(drug_train, aes(x = Nicotine, y = Impulsive)) + geom_boxplot()
+p7 <- ggplot(drug_train, aes(x = Nicotine, y = SS)) + geom_boxplot()
+grid.arrange(p1,p2,p3,p4,p5,p6,p7)
+```
+
+```{r}
+# Answer 5 
+set.seed(123)
+drug_folds <- vfold_cv(drug_train, v = 5)
+```
+
+```{r}
+drug_recipe <- recipe(Nicotine ~., drug_train) 
+
+drug_model <- rand_forest(mtry = tune(), min_n = tune(),trees = 100) %>%
+  set_engine("ranger", importance = "permutation") %>%
+  set_mode("classification") 
+
+drug_workflow <- workflow() %>%
+  add_model(drug_model) %>%
+  add_recipe(drug_recipe) 
+
+drug_grid <- grid_regular(
+mtry(range = c(2,8)),
+min_n(range = c(5,20)),
+levels = 10
+)
+
+set.seed(123)
+drug_res_tuned <- tune_grid(
+  drug_workflow,
+  resamples = drug_folds,
+  grid = drug_grid
+) 
+
+#Visualize 
+
+drug_res_tuned %>%
+  collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  mutate(min_n = factor(min_n)) %>%
+  ggplot(aes(mtry, mean, color = min_n)) +
+  geom_line(alpha = 0.5, size = 1.5) +
+  geom_point() +
+  labs(y = "Accuracy")
+  
+```
+```{r}
+# Answer 6
+
+best_value <- select_best(drug_res_tuned, "accuracy")
+
+final_value <- finalize_workflow(
+  drug_workflow,
+  best_value
+  )
+final_value 
+
+final_fit <- fit(final_value, drug_train)   # This is final model
+
+final_fit %>% pull_workflow_fit() %>% vip(geom = "point")
+```
+```{r}
+
+# Prediction 
+
+trainpred <- predict(final_fit, drug_train)
+head(trainpred) 
+
+confusionMatrix(trainpred$.pred_class, drug_train$Nicotine, positive = "Yes")
+```
+
+```{r}
+testpred <- predict(final_fit, drug_test)
+head(testpred)
+
+confusionMatrix(testpred$.pred_class, drug_test$Nicotine, positive = "Yes")
+```
+```{r}
+# Save the model to a file to load later (if needed)  
+saveRDS(final_fit, "final_fit.rds") 
+
+```
+
+```{r}
+# Load the model  
+
+final_fit = readRDS("final_fit.rds")
+
+

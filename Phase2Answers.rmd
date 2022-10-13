@@ -1,0 +1,305 @@
+---
+output:
+  word_document: default
+  html_document: default
+---
+# Final Project - Phase 2 
+
+```{r}
+library(tidymodels)
+library(tidyverse)
+library(GGally)
+library(gridExtra)
+library(lmtest)
+library(glmnet)
+library(MASS)
+library(splines)
+library(leaps)
+library(ggcorrplot)
+library(car)
+library(e1071)
+library(ROCR)
+library(usemodels)
+library(rpart)
+library(rpart.plot)
+library(RColorBrewer)
+library(rattle)
+library(caret)
+library(ranger)
+library(randomForest)
+library(vip)
+library(xgboost)
+library(DALEXtra) 
+library(nnet)
+library(stacks)
+library(mice)
+library(skimr)
+library(dplyr)
+```
+
+```{r}
+
+library(readr)
+ames_student <- read_csv("ames_student.csv") 
+
+ames <- ames_student
+
+Ames1 <- ames %>% dplyr::select(Lot_Area, Gr_Liv_Area, Year_Sold, Fireplaces, Kitchen_Qual, Low_Qual_Fin_SF, Central_Air, Garage_Area, House_Style, Lot_Frontage, Overall_Qual, Overall_Cond, Bedroom_AbvGr, Neighborhood, Lot_Shape, Full_Bath, Pool_QC, Above_Median)
+
+# is.na(ames) 
+
+#ames <- ames %>% dplyr::select(-Latitude) %>% dplyr:: select(-Longitude)
+
+
+Ames1 <- Ames1 %>% mutate_if(is.character, as_factor) 
+#ames <- ames %>% mutate(Above_Median = fct_recode(Above_Median, "0" = "No", "1" = "Yes")) 
+
+```
+
+Splitting
+  
+```{r}
+# Same Spliting for all models
+
+set.seed(123)
+Ames_Split <- initial_split(Ames1, prop = 0.7, strata = Above_Median)
+train <- training(Ames_Split)
+test <- testing(Ames_Split)
+
+``` 
+
+```{r} 
+# Same number of fold for all models that requires cross-folding in order to keep same fold for all, so that it will help to get somewhat similar results
+
+set.seed(123)
+folds <- vfold_cv(train, v = 5)
+
+```
+  
+
+  Logistic Regression Model
+  
+```{r}
+
+log_reg_model <-
+  logistic_reg(mode = "classification") %>% 
+  set_engine("glm") 
+
+log_reg_recipe <- recipe(Above_Median ~., train) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+log_reg_wf <- workflow() %>%
+  add_recipe(log_reg_recipe) %>% 
+  add_model(log_reg_model)
+
+log_reg_fit <- fit(log_reg_wf, train) 
+
+# Prediction and Confusion Matrix on training set
+predictions_train <- predict(log_reg_fit, train, type="class")
+head(predictions_train) 
+
+confusionMatrix(predictions_train$.pred_class, train$Above_Median, positive = "Yes") 
+
+#Prediction and Confusion Matrix on testing set 
+predictions_test <- predict(log_reg_fit, test, type = "class")
+head(predictions_test)
+
+confusionMatrix(predictions_test$.pred_class, test$Above_Median, positive = "Yes") 
+
+```
+
+
+  Classification Tree Model
+
+```{r} 
+
+class_recipe <- recipe(Above_Median ~., train)
+
+class_model <- decision_tree() %>% 
+  set_engine("rpart", model = TRUE) %>% 
+  set_mode("classification")
+
+class_wflow <-
+  workflow() %>% 
+  add_model(class_model) %>% 
+  add_recipe(class_recipe)
+
+class_fit <- fit(class_wflow, train) 
+
+class_fit %>%
+  pull_workflow_fit() %>%
+  pluck("fit")  
+
+#extracting the tree's fit from the fit object
+tree <- class_fit %>% 
+  pull_workflow_fit() %>% 
+  pluck("fit")
+
+# plot tree
+fancyRpartPlot(tree) 
+
+class_fit$fit$fit$fit$cptable 
+
+treepred_train <- predict(class_fit, train, type = "class")
+head(treepred_train) 
+
+# Confusion matrix and accuracy calculation
+confusionMatrix(treepred_train$.pred_class,train$Above_Median,positive="Yes") 
+
+# Predictions on testing set
+treepred_test <- predict(class_fit, test, type = "class")
+head(treepred_test) 
+
+confusionMatrix(treepred_test$.pred_class, test$Above_Median, positive = "Yes")
+
+```
+
+
+  Random Forest Model
+  
+```{r} 
+
+random_recipe <- recipe(Above_Median ~., train) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+random_model <- rand_forest(mtry = tune(), min_n = tune(), trees = 100) %>% 
+  set_engine("ranger", importance = "permutation") %>%
+  set_mode("classification")
+
+random_wflow = 
+  workflow() %>% 
+  add_model(random_model) %>% 
+  add_recipe(random_recipe)
+
+random_grid = grid_regular(
+  mtry(range = c(3, 10)), 
+  min_n(range = c(20, 70)), 
+  levels = 5
+)
+
+set.seed(123)
+random_res_tuned = tune_grid(
+  random_wflow,
+  resamples = folds,
+  grid = random_grid 
+)
+
+# Borrowed code from lecture
+
+random_res_tuned %>%
+  collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  dplyr::select(mean, min_n, mtry) %>%
+  pivot_longer(min_n:mtry,
+    values_to = "value",
+    names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "Accuracy")
+
+best_randomF <- select_best(random_res_tuned, "accuracy")
+
+final_randomF <- finalize_workflow(
+  random_wflow,
+  best_randomF
+)
+
+final_randomF
+
+#fit the finalized workflow to our training data
+final_random_fit <- fit(final_randomF, train) 
+
+# Checking variable importance
+final_random_fit %>% pull_workflow_fit() %>% vip(geom = "point")
+
+# Prediction and Confusion Matrix on training set
+trainpred_random <- predict(final_random_fit, train)
+head(trainpred_random)
+
+confusionMatrix(trainpred_random$.pred_class, train$Above_Median, positive = "Yes") 
+
+# Prediction and Confusion Matrix on testing set
+testpred_random <- predict(final_random_fit, test)
+head(testpred_random)
+
+confusionMatrix(testpred_random$.pred_class, test$Above_Median, positive = "Yes") 
+
+# Save the model to a file to load later (if needed)  
+saveRDS(final_random_fit, "final_random_fit.rds")
+
+# Load the model 
+#final_random_fit <- readRDS("final_random_fit.rds")
+```
+
+
+  XGBoost Model (Extreme Gradient Boosting) 
+  
+```{r}
+#use_xgboost(Above_Median ~., train) 
+
+start_time = Sys.time() 
+
+tgrid <- expand.grid(
+  trees = 100, #50, 100, and 150 in default 
+  min_n = 1, #fixed at 1 as default 
+  tree_depth = c(1,2,3,4), #1, 2, and 3 in default 
+  learn_rate = c(0.01, 0.1, 0.2, 0.3), #0.3 and 0.4 in default 
+  loss_reduction = 0, #fixed at 0 in default 
+  sample_size = c(0.5, 1) #0.5, 0.75, and 1 in default, we don't have much data so can choose a larger value
+)
+
+xgboost_recipe <- 
+  recipe(formula = Above_Median ~ ., data = train) %>% 
+  #step_novel(all_nominal_predictors()) %>% 
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>% 
+  step_zv(all_predictors()) 
+
+xgboost_spec <- 
+  boost_tree(trees = tune(), min_n = tune(), tree_depth = tune(), learn_rate = tune(), 
+    loss_reduction = tune(), sample_size = tune()) %>% 
+  set_mode("classification") %>% 
+  set_engine("xgboost") 
+
+xgboost_workflow <- 
+  workflow() %>% 
+  add_recipe(xgboost_recipe) %>% 
+  add_model(xgboost_spec) 
+
+set.seed(42677)
+xgboost_tune <-
+  tune_grid(xgboost_workflow, resamples = folds, grid = tgrid) 
+
+end_time = Sys.time()
+end_time - start_time 
+
+# Selecting best accuracy
+best_xgb <- select_best(xgboost_tune, "accuracy")
+
+final_xgb <- finalize_workflow(
+  xgboost_workflow,
+  best_xgb
+)
+
+final_xgb 
+
+#fit the finalized workflow to our training data
+final_xgb_fit <- fit(final_xgb, train)  
+
+# Prediction and Confusion Matrix on training set 
+trainpred_xgb <- predict(final_xgb_fit, train)
+confusionMatrix(trainpred_xgb$.pred_class, train$Above_Median, positive = "Yes")
+
+# Prediction and Confusion Matrix on testing set
+testpred_xgb <- predict(final_xgb_fit, test)
+confusionMatrix(testpred_xgb$.pred_class, test$Above_Median, positive = "Yes")
+
+```
+
+
+
+
+
+
+
